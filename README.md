@@ -103,6 +103,7 @@ For a single-file .exe (slower start, larger):
 
 ```bash
 pyinstaller --noconfirm --windowed --onefile --name "MastCellDetector" \
+    --exclude-module PyQt6
     --add-data "ui/style.qss;ui" \
     --collect-data ultralytics \
     main.py
