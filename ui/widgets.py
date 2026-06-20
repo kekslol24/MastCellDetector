@@ -16,7 +16,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QBrush, QFont
-from PySide6.QtWidgets import QListView, QStyledItemDelegate, QStyle
+from PySide6.QtWidgets import QLabel, QListView, QStyledItemDelegate, QStyle
 
 from ..core.annotations import (
     CLASS_COLORS,
@@ -28,7 +28,8 @@ from ..core.annotations import (
 )
 
 
-THUMB_SIZE = 192
+THUMB_SIZE = 96       # 1/4 the area of the original 192-px tile
+THUMB_HOVER_SIZE = 240
 CACHE_LIMIT = 600
 
 
@@ -46,6 +47,8 @@ class ThumbnailCache(QObject):
         super().__init__(parent)
         self._img_cache: "OrderedDict[str, QImage]" = OrderedDict()
         self._pix_cache: "OrderedDict[str, QPixmap]" = OrderedDict()
+        self._hover_img_cache: "OrderedDict[str, QImage]" = OrderedDict()
+        self._hover_pix_cache: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._pending: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -64,6 +67,20 @@ class ThumbnailCache(QObject):
             self._pix_cache.popitem(last=False)
         return pix
 
+    def get_hover(self, path: str) -> Optional[QPixmap]:
+        pix = self._hover_pix_cache.get(path)
+        if pix is not None:
+            self._hover_pix_cache.move_to_end(path)
+            return pix
+        img = self._hover_img_cache.get(path)
+        if img is None:
+            return None
+        pix = QPixmap.fromImage(img)
+        self._hover_pix_cache[path] = pix
+        if len(self._hover_pix_cache) > CACHE_LIMIT:
+            self._hover_pix_cache.popitem(last=False)
+        return pix
+
     def request(self, path: str, boxes: list[Box]) -> Optional[QPixmap]:
         pix = self.get(path)
         if pix is not None:
@@ -79,42 +96,81 @@ class ThumbnailCache(QObject):
             img = QImage(path)
             if img.isNull():
                 return
-            scaled = img.scaled(
-                THUMB_SIZE, THUMB_SIZE,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            sx = scaled.width() / max(img.width(), 1)
-            sy = scaled.height() / max(img.height(), 1)
-            painter = QPainter(scaled)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            for b in boxes:
-                col = CLASS_COLORS[b.cls % len(CLASS_COLORS)]
-                pen = QPen(QColor(*col, 220))
-                pen.setWidth(2)
-                painter.setPen(pen)
-                painter.drawRect(int(b.x1 * sx), int(b.y1 * sy),
-                                 int((b.x2 - b.x1) * sx), int((b.y2 - b.y1) * sy))
-            painter.end()
-            self._store(path, scaled)
+            img_w, img_h = img.width(), img.height()
+
+            # Crop to the highest-confidence box region (with padding) so the
+            # gallery shows the actual cell rather than the full tissue section.
+            if boxes:
+                best = max(boxes, key=lambda b: b.conf)
+                bw = best.x2 - best.x1
+                bh = best.y2 - best.y1
+                pad = max(max(bw, bh) * 0.5, 10.0)
+                cx1 = max(0, int(best.x1 - pad))
+                cy1 = max(0, int(best.y1 - pad))
+                cx2 = min(img_w, int(best.x2 + pad))
+                cy2 = min(img_h, int(best.y2 + pad))
+                crop = img.copy(cx1, cy1, cx2 - cx1, cy2 - cy1)
+            else:
+                cx1, cy1, cx2, cy2 = 0, 0, img_w, img_h
+                crop = img
+
+            crop_w = cx2 - cx1
+            crop_h = cy2 - cy1
+
+            small_img: Optional[QImage] = None
+            hover_img: Optional[QImage] = None
+            for target_size in (THUMB_SIZE, THUMB_HOVER_SIZE):
+                scaled = crop.scaled(
+                    target_size, target_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                sc_x = scaled.width() / max(crop_w, 1)
+                sc_y = scaled.height() / max(crop_h, 1)
+                painter = QPainter(scaled)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                for b in boxes:
+                    col = CLASS_COLORS[b.cls % len(CLASS_COLORS)]
+                    pen = QPen(QColor(*col, 220))
+                    pen.setWidth(2)
+                    painter.setPen(pen)
+                    rx1 = int((b.x1 - cx1) * sc_x)
+                    ry1 = int((b.y1 - cy1) * sc_y)
+                    rw = max(1, int((b.x2 - b.x1) * sc_x))
+                    rh = max(1, int((b.y2 - b.y1) * sc_y))
+                    painter.drawRect(rx1, ry1, rw, rh)
+                painter.end()
+                if target_size == THUMB_SIZE:
+                    small_img = scaled
+                else:
+                    hover_img = scaled
+
+            self._store(path, small_img, hover_img)
         except Exception:
             pass
         finally:
             self._pending.discard(path)
 
-    def _store(self, path: str, img: QImage):
-        self._img_cache[path] = img
+    def _store(self, path: str, small: QImage, hover: QImage):
+        self._img_cache[path] = small
         if len(self._img_cache) > CACHE_LIMIT:
             self._img_cache.popitem(last=False)
+        self._hover_img_cache[path] = hover
+        if len(self._hover_img_cache) > CACHE_LIMIT:
+            self._hover_img_cache.popitem(last=False)
         self.ready.emit(path)
 
     def invalidate(self, path: str):
         self._img_cache.pop(path, None)
         self._pix_cache.pop(path, None)
+        self._hover_img_cache.pop(path, None)
+        self._hover_pix_cache.pop(path, None)
 
     def clear(self):
         self._img_cache.clear()
         self._pix_cache.clear()
+        self._hover_img_cache.clear()
+        self._hover_pix_cache.clear()
 
 
 class GalleryModel(QAbstractListModel):
@@ -122,6 +178,7 @@ class GalleryModel(QAbstractListModel):
 
     PathRole = Qt.UserRole + 1
     MetaRole = Qt.UserRole + 2
+    HoverPixmapRole = Qt.UserRole + 3
 
     def __init__(self, cache: ThumbnailCache, parent=None):
         super().__init__(parent)
@@ -174,6 +231,8 @@ class GalleryModel(QAbstractListModel):
             return str(path)
         if role == self.MetaRole:
             return meta
+        if role == self.HoverPixmapRole:
+            return self._cache.get_hover(str(path))
         return None
 
     @Slot(str)
@@ -252,9 +311,38 @@ def _status_badge(meta: ImageMeta) -> tuple[str, QColor]:
     return (f"● {meta.n_boxes} box · {meta.max_conf:.2f}", QColor("#3fb46a"))
 
 
+class _HoverPreview(QLabel):
+    """Floating crop-preview that appears when hovering over a gallery tile."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(
+            "background:#1e2130; border:1px solid #4a4f60; padding:6px; border-radius:4px;"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def show_near(self, pix: QPixmap, item_rect):
+        self.setPixmap(pix)
+        self.adjustSize()
+        x = item_rect.right() + 6
+        y = item_rect.top()
+        pw = self.parent().width() if self.parent() else 9999
+        ph = self.parent().height() if self.parent() else 9999
+        if x + self.width() > pw:
+            x = max(0, item_rect.left() - self.width() - 6)
+        if y + self.height() > ph:
+            y = max(0, ph - self.height())
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+
 class GalleryView(QListView):
     image_activated = Signal(str)
     context_menu_requested = Signal(str)  # image_path
+    delete_requested = Signal(str)        # image_path — Del key instant FP
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -264,10 +352,48 @@ class GalleryView(QListView):
         self.setSpacing(4)
         self.setUniformItemSizes(True)
         self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.activated.connect(self._on_activate)
         self.doubleClicked.connect(self._on_activate)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
+
+        self._hover_preview = _HoverPreview(self.viewport())
+        self._hovered_index = QModelIndex()
+
+    def mouseMoveEvent(self, event):
+        idx = self.indexAt(event.pos())
+        if idx.isValid():
+            if idx != self._hovered_index:
+                self._hovered_index = idx
+                pix = idx.data(GalleryModel.HoverPixmapRole)
+                if pix and not pix.isNull():
+                    self._hover_preview.show_near(pix, self.visualRect(idx))
+                else:
+                    self._hover_preview.hide()
+        elif self._hovered_index.isValid():
+            self._hovered_index = QModelIndex()
+            self._hover_preview.hide()
+        super().mouseMoveEvent(event)
+
+    def enterEvent(self, event):
+        self.setFocus()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_preview.hide()
+        self._hovered_index = QModelIndex()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            idx = self._hovered_index if self._hovered_index.isValid() else self.currentIndex()
+            if idx.isValid():
+                path = idx.data(GalleryModel.PathRole)
+                if path:
+                    self.delete_requested.emit(path)
+            return
+        super().keyPressEvent(event)
 
     def _on_activate(self, index: QModelIndex):
         path = index.data(GalleryModel.PathRole)

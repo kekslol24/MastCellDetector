@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._drive_thread: Optional[QThread] = None
         self._drive_worker: Optional[DriveDownloadWorker] = None
         self._editor_source: str = "gallery"  # "gallery" or "stats"
+        self._fp_undo_stack: list[tuple[str, str, ImageMeta]] = []
 
         self._build_ui()
         self._refresh_hardware_label()
@@ -111,6 +112,13 @@ class MainWindow(QMainWindow):
             fb.addWidget(btn)
             self.filter_group.addButton(btn)
         fb.addStretch()
+        self.undo_fp_btn = QPushButton("↩ Undo FP")
+        self.undo_fp_btn.setObjectName("FilterChip")
+        self.undo_fp_btn.setToolTip("Undo last False Positive deletion")
+        self.undo_fp_btn.setVisible(False)
+        self.undo_fp_btn.clicked.connect(self._on_undo_fp)
+        fb.addWidget(self.undo_fp_btn)
+
         self.summary_label = QLabel("No folder loaded")
         self.summary_label.setStyleSheet("color: #b8bcc8;")
         fb.addWidget(self.summary_label)
@@ -138,6 +146,7 @@ class MainWindow(QMainWindow):
         self.gallery.setItemDelegate(GalleryDelegate(self.gallery))
         self.gallery.image_activated.connect(self._open_editor_for)
         self.gallery.context_menu_requested.connect(self._on_gallery_context_menu)
+        self.gallery.delete_requested.connect(self._mark_as_fp)
 
         self.editor = AnnotationEditor()
         self.editor.back_requested.connect(self._on_editor_back)
@@ -343,6 +352,8 @@ class MainWindow(QMainWindow):
         self._folder = Path(path)
         self.editor.open_folder(path)
         self._meta = FolderMeta.load(self._folder)
+        self._fp_undo_stack.clear()
+        self.undo_fp_btn.setVisible(False)
 
         imgs = list_images(self._folder)
         self._all_items = [(p, self._meta.images.get(p.name, ImageMeta())) for p in imgs]
@@ -568,6 +579,10 @@ class MainWindow(QMainWindow):
             clear_action = menu.addAction("Clear edit status")
             clear_action.triggered.connect(lambda: self._clear_edit(path))
             menu.addSeparator()
+        if meta and meta.n_boxes > 0:
+            fp_action = menu.addAction("⚡ Mark as False Positive (delete all boxes)")
+            fp_action.triggered.connect(lambda: self._mark_as_fp(path))
+            menu.addSeparator()
         delete_action = menu.addAction("Delete image")
         delete_action.triggered.connect(lambda: self._delete_image(path))
         menu.exec(QCursor.pos())
@@ -613,6 +628,89 @@ class MainWindow(QMainWindow):
         self._update_summary()
         self._apply_filter()
         self.status.showMessage(f"Deleted {name}", 4000)
+
+    def _mark_as_fp(self, path: str):
+        name = Path(path).name
+        txt_path = label_path_for(path)
+
+        original_content = ""
+        try:
+            if Path(txt_path).exists():
+                original_content = Path(txt_path).read_text()
+        except OSError:
+            pass
+
+        orig = self._meta.images.get(name)
+        original_meta = ImageMeta(
+            n_boxes=orig.n_boxes if orig else 0,
+            max_conf=orig.max_conf if orig else 0.0,
+            mean_conf=orig.mean_conf if orig else 0.0,
+            edited=orig.edited if orig else False,
+            n_atypisch=orig.n_atypisch if orig else 0,
+            n_normal=orig.n_normal if orig else 0,
+        )
+
+        try:
+            Path(txt_path).write_text("")
+        except OSError as e:
+            QMessageBox.warning(self, "Mark FP failed", str(e))
+            return
+
+        new_meta = ImageMeta(n_boxes=0, edited=True)
+        self._meta.images[name] = new_meta
+        if self._folder:
+            self._meta.save(self._folder)
+
+        for i, (p, _) in enumerate(self._all_items):
+            if p.name == name:
+                self._all_items[i] = (p, new_meta)
+                self.thumb_cache.invalidate(str(p))
+                self.gallery_model.update_meta(str(p), new_meta)
+                break
+
+        self._fp_undo_stack.append((path, original_content, original_meta))
+        self.undo_fp_btn.setVisible(True)
+        self._update_summary()
+        self._apply_filter()
+        if self._folder:
+            self.stats_view.refresh(self._folder)
+        self.status.showMessage(f"Marked as FP: {name}", 3000)
+
+    def _on_undo_fp(self):
+        if not self._fp_undo_stack:
+            self.undo_fp_btn.setVisible(False)
+            return
+
+        path, original_content, original_meta = self._fp_undo_stack.pop()
+        name = Path(path).name
+        txt_path = label_path_for(path)
+
+        try:
+            Path(txt_path).write_text(original_content)
+        except OSError as e:
+            QMessageBox.warning(self, "Undo failed", str(e))
+            self._fp_undo_stack.append((path, original_content, original_meta))
+            return
+
+        self._meta.images[name] = original_meta
+        if self._folder:
+            self._meta.save(self._folder)
+
+        for i, (p, _) in enumerate(self._all_items):
+            if p.name == name:
+                self._all_items[i] = (p, original_meta)
+                self.thumb_cache.invalidate(str(p))
+                self.gallery_model.update_meta(str(p), original_meta)
+                break
+
+        if not self._fp_undo_stack:
+            self.undo_fp_btn.setVisible(False)
+
+        self._update_summary()
+        self._apply_filter()
+        if self._folder:
+            self.stats_view.refresh(self._folder)
+        self.status.showMessage(f"Undone FP: {name} restored", 3000)
 
     # ---------------------------------------------------------- editor
     def _open_editor_for(self, path: str):

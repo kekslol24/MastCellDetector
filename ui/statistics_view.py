@@ -292,7 +292,7 @@ class StatisticsView(QWidget):
         if not path:
             return
         try:
-            Path(path).write_text(format_summary_text(self._stats))
+            Path(path).write_text(format_summary_text(self._stats), encoding="utf-8")
         except Exception as e:
             QMessageBox.warning(self, "Export failed", str(e))
             return
