@@ -1,7 +1,6 @@
 # Mast Cell Detector — Desktop
 
-A native desktop replacement for the Gradio app. Designed to handle 20k+ image
-runs that the browser-based version cannot.
+Automated mast cell detection application that let's you choose your own model YOLO weights to run inference on bone marrow aspirate images for cell classification and quantification.
 
 
 ## Features
