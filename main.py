@@ -15,7 +15,7 @@ def main() -> int:
     if str(here.parent) not in sys.path:
         sys.path.insert(0, str(here.parent))
 
-    from desktop_app.ui.main_window import MainWindow
+    from MastCellDetector.ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

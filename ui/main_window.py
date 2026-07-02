@@ -172,6 +172,10 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.status.addPermanentWidget(self.progress)
 
+        self.dev_label = QLabel("Developed by Florian Vollmer, florian.vol@hotmail.com")
+        self.dev_label.setStyleSheet("color: #7a7f8c;")
+        self.status.addPermanentWidget(self.dev_label)
+
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName("Sidebar")
