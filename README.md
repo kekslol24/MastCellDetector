@@ -3,6 +3,7 @@
 A native desktop replacement for the Gradio app. Designed to handle 20k+ image
 runs that the browser-based version cannot.
 
+Either download the `MastCellDetector.exe` in `dist/` or start with instructions from below.
 
 ## Features
 
