@@ -1,7 +1,8 @@
 # Mast Cell Detector — Desktop
 
-A native desktop replacement for the Gradio app. Designed to handle 20k+ image
-runs that the browser-based version cannot.
+Tool developed in result of [Bachelor thesis repo](https://github.com/kekslol24/mast-cell-detection-thesis)
+
+A native desktop app. Designed to handle 20k+ image.
 
 Either download the `MastCellDetector.exe` in `dist/` or start with instructions from below.
 
